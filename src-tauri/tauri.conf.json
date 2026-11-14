@@ -44,7 +44,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFRTAzNEEwQTk1QzA5NzkKUldSNUNWeXBvRFRnL2tCbkRpQmNBNXhVUHc5bUFCMHM2ZDNtOUZKTjFnOElzZ3duazhScW9YVEQK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2NkY3MDQwQjcyQzE4REUKUldUZUdDeTNRSEJ2MWgrb3hPUW5XTmx2Q28wMEtSaGZvQ3ErMkEvMTBKa3FMMnUxSFZvRW9FKzkK",
       "endpoints": [
         "https://github.com/Pavel-us/FontChanger/releases/latest/download/latest.json"
       ]
