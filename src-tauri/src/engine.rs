@@ -1181,7 +1181,7 @@ mod tests {
         fs::write(&f, "{ not json").unwrap();
         assert!(load_template(&f.to_string_lossy()).unwrap_err().starts_with("err.template_parse\u{1f}"));
         // rules that cannot run are not saved
-        let bad = Template { rules: vec![rule("Arial", "", "", "")], ..Default::default() };
+        let bad = Template { rules: vec![rule("Arial", "", "", "12")], ..Default::default() };
         assert_eq!(save_template(&f.to_string_lossy(), bad).unwrap_err(), "err.rule_font_target\u{1f}1");
         // unknown fields are ignored
         fs::write(&f, r#"{"format":"fctpl","version":1,"future":true,"rules":[{"toFont":"Arial","extra":1}]}"#).unwrap();
