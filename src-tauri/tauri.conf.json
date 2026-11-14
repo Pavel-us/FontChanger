@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Font Changer",
+  "version": "1.0.0",
+  "identifier": "dev.fontchanger.app",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Font Changer",
+        "width": 1180,
+        "height": 800,
+        "minWidth": 980,
+        "minHeight": 680
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Productivity",
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "shortDescription": "Batch font and font size changer",
+    "longDescription": "Changes fonts and font sizes in many Word, Excel, PowerPoint, LibreOffice, RTF, HTML and CSS files at once.",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/font-changer.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFRTAzNEEwQTk1QzA5NzkKUldSNUNWeXBvRFRnL2tCbkRpQmNBNXhVUHc5bUFCMHM2ZDNtOUZKTjFnOElzZ3duazhScW9YVEQK",
+      "endpoints": [
+        "https://github.com/Pavel-us/FontChanger/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

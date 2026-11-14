@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Font Changer
+Name[ru]=Font Changer
+Comment=Batch font and font size changer for documents
+Comment[ru]=Массовая смена шрифтов и размеров в документах
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=Office;
+Keywords=font;fonts;size;docx;xlsx;pptx;odt;rtf;html;шрифт;шрифты;размер;

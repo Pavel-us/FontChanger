@@ -1,0 +1,44 @@
+[
+ {
+  "id": "official",
+  "fromFont": "",
+  "toFont": "Times New Roman",
+  "fromSize": "",
+  "toSize": "14"
+ },
+ {
+  "id": "arial_calibri",
+  "fromFont": "Arial",
+  "toFont": "Calibri",
+  "fromSize": "",
+  "toSize": ""
+ },
+ {
+  "id": "any_arial",
+  "fromFont": "",
+  "toFont": "Arial",
+  "fromSize": "",
+  "toSize": ""
+ },
+ {
+  "id": "any_size_12",
+  "fromFont": "",
+  "toFont": "",
+  "fromSize": "",
+  "toSize": "12"
+ },
+ {
+  "id": "small_up",
+  "fromFont": "",
+  "toFont": "",
+  "fromSize": "10",
+  "toSize": "11"
+ },
+ {
+  "id": "times_georgia",
+  "fromFont": "Times New Roman",
+  "toFont": "Georgia",
+  "fromSize": "",
+  "toSize": ""
+ }
+]

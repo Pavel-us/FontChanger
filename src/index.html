@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Font Changer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">F</div>
+      <div>
+        <h1>Font Changer</h1>
+        <p class="muted" data-i18n="app.subtitle"></p>
+      </div>
+    </div>
+
+    <label class="lbl" for="folder" data-i18n="folder.label"></label>
+    <div class="row">
+      <input id="folder" type="text" data-i18n-ph="folder.placeholder" spellcheck="false">
+      <button id="browse" class="btn" data-i18n="folder.browse"></button>
+    </div>
+    <button id="scanBtn" class="btn wide" data-i18n="scan.btn"></button>
+
+    <label class="lbl" for="mask" data-i18n="mask.label"></label>
+    <input id="mask" type="text" value="*" placeholder="*.docx;*.xlsx;*.pptx" spellcheck="false">
+
+    <div id="switches" class="switches"></div>
+
+    <label class="lbl" for="maxsize" data-i18n="maxsize.label"></label>
+    <input id="maxsize" type="number" min="0" step="1" value="100">
+
+    <label class="lbl" for="minsize" data-i18n="minsize.label"></label>
+    <input id="minsize" type="number" min="0" step="0.5" value="6">
+
+    <div class="spacer"></div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button id="updateBadge" class="pill hidden" data-i18n="update.badge"></button>
+      <div class="spacer"></div>
+      <div class="pop-wrap">
+        <button id="settingsBtn" class="btn icon" data-i18n-title="settings.title">⚙</button>
+        <div id="settingsPop" class="pop hidden">
+          <label class="lbl" for="lang" data-i18n="lang.label"></label>
+          <div class="row">
+            <select id="lang"></select>
+            <button id="openLoc" class="btn" data-i18n-title="lang.open_title">📂</button>
+          </div>
+          <label class="lbl" for="theme" data-i18n="theme.label"></label>
+          <select id="theme">
+            <option value="system" data-i18n="theme.system"></option>
+            <option value="dark" data-i18n="theme.dark"></option>
+            <option value="light" data-i18n="theme.light"></option>
+          </select>
+          <label class="switch pop-switch">
+            <input type="checkbox" id="opt-autoUpdate" checked>
+            <span class="tr"></span>
+            <span class="tx" data-i18n="about.auto"></span>
+          </label>
+        </div>
+      </div>
+      <button id="helpBtn" class="btn icon" data-i18n-title="help.open_title">?</button>
+    </header>
+
+    <section class="editors">
+      <div class="card">
+        <div class="card-title" data-i18n="from.title"></div>
+        <label class="lbl" for="fromFont" data-i18n="field.font"></label>
+        <div class="wrap"><input id="fromFont" type="text" data-i18n-ph="from.font_ph" spellcheck="false" autocomplete="off"><div id="fromFontMenu" class="menu hidden"></div></div>
+        <div id="fromFontHint" class="hint"></div>
+        <label class="lbl" for="fromSize" data-i18n="field.size"></label>
+        <div class="wrap"><input id="fromSize" type="text" inputmode="decimal" data-i18n-ph="from.size_ph" spellcheck="false" autocomplete="off"><div id="fromSizeMenu" class="menu hidden"></div></div>
+        <div id="fromSizeHint" class="hint"></div>
+      </div>
+      <div class="card">
+        <div class="card-title" data-i18n="to.title"></div>
+        <label class="lbl" for="toFont" data-i18n="field.font"></label>
+        <input id="toFont" type="text" list="fontList" data-i18n-ph="to.font_ph" spellcheck="false" autocomplete="off">
+        <label class="lbl" for="toSize" data-i18n="field.size"></label>
+        <input id="toSize" type="text" inputmode="decimal" data-i18n-ph="to.size_ph" spellcheck="false" autocomplete="off">
+      </div>
+    </section>
+    <datalist id="fontList"></datalist>
+    <div id="scanInfo"></div>
+
+    <div class="row gap">
+      <button id="addRule" class="btn" data-i18n="btn.add"></button>
+      <button id="loadRules" class="btn" data-i18n="btn.load"></button>
+      <button id="saveRules" class="btn" data-i18n="btn.save"></button>
+      <span class="muted small" data-i18n="rules.hint"></span>
+    </div>
+
+    <div id="rules" class="rules"></div>
+
+    <div class="row gap actions">
+      <button id="dry" class="btn" data-i18n="btn.preview"></button>
+      <button id="run" class="btn primary" data-i18n="btn.run"></button>
+      <div id="spinner" class="spinner hidden" aria-hidden="true"></div>
+      <span id="status" class="muted"></span>
+    </div>
+
+    <div id="stats" class="stats"></div>
+
+    <div class="results">
+      <table id="resTable">
+        <colgroup><col id="colFile"><col id="colCount"><col id="colStatus"></colgroup>
+        <thead>
+          <tr>
+            <th><span data-i18n="results.th.file"></span><i class="grip" data-col="0"></i></th>
+            <th class="num"><span data-i18n="results.th.count"></span><i class="grip" data-col="1"></i></th>
+            <th><span data-i18n="results.th.status"></span><i class="grip" data-col="2"></i></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty muted"></div>
+    </div>
+  </main>
+</div>
+
+<div id="helpModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <h2 data-i18n="help.title"></h2>
+      <button id="helpClose" class="btn icon" data-i18n-title="common.close">✕</button>
+    </div>
+    <div id="helpTabs" class="tabs">
+      <button class="tab active" data-tab="about" data-i18n="help.tab.about"></button>
+      <button class="tab" data-tab="start" data-i18n="help.tab.start"></button>
+      <button class="tab" data-tab="formats" data-i18n="help.tab.formats"></button>
+      <button class="tab" data-tab="presets" data-i18n="help.tab.presets"></button>
+    </div>
+    <div class="modal-body">
+      <section id="tab-about" class="tabpane">
+        <div class="about-brand">
+          <div class="logo big">F</div>
+          <div>
+            <h3>Font Changer</h3>
+            <p id="aboutVersion" class="muted"></p>
+          </div>
+        </div>
+        <p data-i18n="about.desc"></p>
+        <p class="muted small" data-i18n="about.license"></p>
+        <div class="row gap">
+          <button id="checkUpdates" class="btn" data-i18n="about.check"></button>
+          <button id="openRepo" class="btn" data-i18n="about.github"></button>
+          <button id="openDocs" class="btn" data-i18n="about.docs"></button>
+        </div>
+
+        <p id="aboutStatus" class="muted small"></p>
+      </section>
+      <section id="tab-start" class="tabpane hidden"><ol id="startList" class="help-list"></ol></section>
+      <section id="tab-formats" class="tabpane hidden"><ul id="formatsList" class="help-list"></ul></section>
+      <section id="tab-presets" class="tabpane hidden">
+        <p data-i18n="presets.intro"></p>
+        <p class="muted small" data-i18n="presets.note"></p>
+        <div id="presetsList" class="presets"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div id="updateModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 data-i18n="update.title"></h2>
+    </div>
+    <div class="modal-body">
+      <p id="updateText"></p>
+      <h4 class="notes-title" data-i18n="update.notes"></h4>
+      <div id="updateNotes" class="notes"></div>
+      <progress id="updProgress" class="hidden" max="100" value="0"></progress>
+      <p id="updateMsg" class="muted small"></p>
+    </div>
+    <div class="modal-foot">
+      <button id="updSkip" class="btn" data-i18n="update.skip"></button>
+      <div class="spacer"></div>
+      <button id="updLater" class="btn" data-i18n="update.later"></button>
+      <button id="updNow" class="btn primary" data-i18n="update.now"></button>
+      <button id="updPage" class="btn primary hidden" data-i18n="update.open_page"></button>
+    </div>
+  </div>
+</div>
+
+<div id="drop" class="drop hidden"><div data-i18n="drop.hint"></div></div>
+<script src="main.js"></script>
+</body>
+</html>

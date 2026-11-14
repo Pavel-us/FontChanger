@@ -1,0 +1,26 @@
+{
+  "name": "font-changer",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon app-icon.png",
+    "check:locales": "node scripts/check-locales.mjs",
+    "test": "npm run check:locales && cargo test --manifest-path src-tauri/Cargo.toml",
+    "build:local": "tauri build --config src-tauri/tauri.nosign.conf.json",
+    "set-updater-key": "node scripts/set-updater-key.mjs",
+    "build:deb": "tauri build --bundles deb --config src-tauri/tauri.nosign.conf.json",
+    "build:appimage": "NO_STRIP=true tauri build --bundles appimage --config src-tauri/tauri.nosign.conf.json"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "description": "Batch font and font size changer for Word, Excel, PowerPoint, LibreOffice, RTF and HTML/CSS files",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pavel-us/FontChanger.git"
+  }
+}
