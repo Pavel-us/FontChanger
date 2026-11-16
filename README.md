@@ -33,7 +33,9 @@ Several rules can be queued in a list or loaded from a tab-separated file.
 | HTML / CSS `.html .htm .xhtml .css` | `font-family`, `font-size`, `font` shorthand, `<font face>` (sizes written in pt; `@font-face` never renamed) |
 
 **Not supported** (reported as "skipped"): PDF (text is drawn with embedded fonts), old binary `.doc .xls .ppt` (save as `.docx/.xlsx/.pptx` first). Plain text has no fonts and is ignored.
-Not changed inside supported files: charts, embedded objects, pictures, embedded font files.
+Not changed inside supported files: embedded objects, pictures with text, embedded font files.
+Charts and SmartArt **are** changed (Word `word/charts`, `word/diagrams`, Excel `xl/charts`, PowerPoint `ppt/charts`).
+After a change the files are read again: anything the rules would still change is marked as **left over**, with a hint when the text sits inside an embedded object or a picture — so a silent skip is visible instead of hidden.
 
 ## Safe by design
 
@@ -66,6 +68,9 @@ In Excel all cell sizes count as text; for HTML and CSS the format does not say,
 
 **Protection of tiny sizes.** "Any size → X" leaves sizes **below 6 pt** alone by default (setting in the side panel, 0 = off), so spacer lines keep their height. A rule with an explicit source size (e.g. `1 → 2`) always applies.
 
+## Fonts this computer does not have
+**Check fonts…** scans the folder and lists the families that are used in the documents but are not installed here (symbol fonts and broken names are skipped). Such a document silently falls back to another font, so this is usually the reason a file "looks wrong" on one machine and fine on another. Add a rule from the missing font to an installed one to fix the look.
+
 ## Rule templates (`.fctpl`)
 
 **Save rules…** writes the rule list (or the filled-in fields) to a `.fctpl` file; **Load rules…** reads it back, together with the mask and the two options that change the result (symbol fonts, other scripts). A `.fctpl` file is plain JSON:
@@ -73,19 +78,72 @@ In Excel all cell sizes count as text; for HTML and CSS the format does not say,
 ```json
 {
   "format": "fctpl",
-  "version": 1,
+  "version": 2,
   "name": "official-docs",
   "mask": "*.docx",
   "options": { "keepSymbols": true, "scripts": false },
   "rules": [
     { "fromFont": "Arial", "toFont": "Calibri", "fromSize": "", "toSize": "" },
-    { "fromFont": "", "toFont": "Times New Roman", "fromSize": "", "toSize": "14" }
+    { "fromFont": "", "toFont": "Times New Roman", "fromSize": "", "toSize": "14" },
+    { "fromFont": "", "toFont": "Arial", "fromSize": "", "toSize": "11", "scope": "headers" }
   ]
 }
 ```
 
 Empty strings mean "any" (left side) or "unchanged" (right side). Unknown fields are ignored, and files with a newer `version` are refused with a clear message.
 Old tab-separated rule files (`from font ⇥ to font ⇥ from size ⇥ to size`, `#` = comment) can still be loaded.
+
+## Areas: change only part of a document
+A rule may carry a `scope`, and then it changes only that part of a Word file:
+
+| `scope` | part |
+|---|---|
+| `body` | `word/document.xml` |
+| `headers` / `footers` | `word/header*.xml`, `word/footer*.xml` |
+| `footnotes` / `endnotes` / `comments` | the matching part |
+| `styles` | `word/styles.xml` |
+
+A rule without a scope applies everywhere. In Excel, PowerPoint, LibreOffice, RTF, HTML and CSS a scoped rule applies to the whole file.
+
+### Paragraph styles
+A rule may also be limited to one paragraph style of a Word document:
+
+```json
+{ "fromFont": "Arial", "toFont": "Calibri", "style": "Heading 1" }
+```
+
+The style is matched by its id (`Heading1`) or by the built-in name (`heading 1`), case-insensitively, and only inside `word/document.xml`. Paragraphs without an explicit style have the document's default style, so `Normal` reaches them too. Excel, PowerPoint and LibreOffice files are not affected by `style`. A rule with a `style` applies to paragraphs of that style only; its `scope` is not used.
+
+### Which rule wins
+
+When several rules could change the same text, the most specific one decides:
+
+1. a rule limited to a **paragraph style** (for paragraphs of that style),
+2. a rule limited to an **area** (inside that area; the `body` area also covers styled paragraphs),
+3. a rule that applies **everywhere**.
+
+So "everything Times New Roman 14, but Heading 1 Arial 16, and headers Arial 11" works as written. Inside one level, rules with a source font or size come before "any" rules.
+
+The left-over check uses only rules without a scope, because it looks at files, not at their parts.
+
+## Command line
+The same engine without the window, for scripts and schedulers:
+
+```
+font-changer --folder /docs --preset official.fctpl --report report.csv
+```
+
+| Argument | Meaning |
+|---|---|
+| `--folder PATH` | folder to process (required) |
+| `--preset FILE` | `.fctpl` with the rules (required); the mask and the options come from it |
+| `--report FILE` | write the results as CSV |
+| `--mask "*.docx"` | use another mask |
+| `--dry` | preview, nothing is written |
+| `--no-backup` | no `.bak` copies |
+| `--flat` | do not look into subfolders |
+
+Exit code: 0 = done, 1 = some files failed, 2 = wrong arguments or rules. `font-changer --help` prints this list. The window is only skipped when `--folder`, `--preset` or `--help` is present; any other argument is ignored. In the Windows release build the program has no console, so the summary line is not printed there: use `--report` and the exit code.
 
 ## Build
 

@@ -20,6 +20,34 @@ async fn run_change(app: AppHandle, req: engine::Request) -> Result<engine::Stat
     result
 }
 
+/// After a real run: lists what the rules would still change (text the engine cannot reach).
+#[tauri::command]
+async fn verify_run(req: engine::Request) -> Result<Vec<engine::Residual>, String> {
+    let handle = tauri::async_runtime::spawn_blocking(move || engine::verify(&req));
+    let result = handle.await.map_err(|e| e.to_string())?;
+    result
+}
+
+/// Fonts the selected files use that this machine does not have.
+#[tauri::command]
+async fn missing_fonts(req: engine::Request) -> Result<Vec<engine::MissingFont>, String> {
+    let handle = tauri::async_runtime::spawn_blocking(move || engine::missing_fonts(&req, || false));
+    handle.await.map_err(|e| e.to_string())?
+}
+
+/// Reads one document and returns the fonts and sizes it uses ("from a sample").
+#[tauri::command]
+async fn sample_file(path: String) -> Result<engine::Sample, String> {
+    let handle = tauri::async_runtime::spawn_blocking(move || engine::sample(&path));
+    handle.await.map_err(|e| e.to_string())?
+}
+
+/// Writes the results table as CSV; returns the path that was written.
+#[tauri::command]
+fn save_report(path: String, rows: Vec<engine::ReportRow>) -> Result<String, String> {
+    engine::write_report(&path, &rows)
+}
+
 /// Reads a .fctpl template (or an old tab-separated rules file).
 #[tauri::command]
 fn load_template(path: String) -> Result<engine::Template, String> {
@@ -126,6 +154,20 @@ fn prepare_locales_dir(app: AppHandle) -> Result<String, String> {
 }
 
 fn main() {
+    // no arguments = the normal window; with arguments it is a headless run for scripts
+    // (only known arguments start it: whatever else a launcher passes must not keep the window from opening)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if engine::wants_cli(&args) {
+        match engine::run_cli(&args) {
+            Ok(Some(code)) => std::process::exit(code),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("{}", engine::cli_message(&e));
+                std::process::exit(2);
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -133,6 +175,10 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             run_change,
+            verify_run,
+            sample_file,
+            save_report,
+            missing_fonts,
             load_template,
             save_template,
             scan_fonts,

@@ -82,6 +82,20 @@
         <input id="toFont" type="text" list="fontList" data-i18n-ph="to.font_ph" spellcheck="false" autocomplete="off">
         <label class="lbl" for="toSize" data-i18n="field.size"></label>
         <input id="toSize" type="text" inputmode="decimal" data-i18n-ph="to.size_ph" spellcheck="false" autocomplete="off">
+        <label class="lbl" for="scope" data-i18n="scope.label"></label>
+        <select id="scope">
+          <option value="" data-i18n="scope.any"></option>
+          <option value="body" data-i18n="scope.body"></option>
+          <option value="headers" data-i18n="scope.headers"></option>
+          <option value="footers" data-i18n="scope.footers"></option>
+          <option value="footnotes" data-i18n="scope.footnotes"></option>
+          <option value="endnotes" data-i18n="scope.endnotes"></option>
+          <option value="comments" data-i18n="scope.comments"></option>
+          <option value="styles" data-i18n="scope.styles"></option>
+        </select>
+        <label class="lbl" for="style" data-i18n="style.label"></label>
+        <input id="style" type="text" data-i18n-ph="style.ph" spellcheck="false" autocomplete="off">
+        <div class="hint" data-i18n="style.hint"></div>
       </div>
     </section>
     <datalist id="fontList"></datalist>
@@ -89,8 +103,10 @@
 
     <div class="row gap">
       <button id="addRule" class="btn" data-i18n="btn.add"></button>
+      <button id="sampleFile" class="btn" data-i18n="btn.sample"></button>
       <button id="loadRules" class="btn" data-i18n="btn.load"></button>
       <button id="saveRules" class="btn" data-i18n="btn.save"></button>
+      <button id="missingBtn" class="btn" data-i18n="btn.missing"></button>
       <span class="muted small" data-i18n="rules.hint"></span>
     </div>
 
@@ -104,6 +120,10 @@
     </div>
 
     <div id="stats" class="stats"></div>
+
+    <div class="row gap">
+      <button id="reportBtn" class="btn" data-i18n="btn.report"></button>
+    </div>
 
     <div class="results">
       <table id="resTable">
@@ -182,6 +202,19 @@
       <button id="updLater" class="btn" data-i18n="update.later"></button>
       <button id="updNow" class="btn primary" data-i18n="update.now"></button>
       <button id="updPage" class="btn primary hidden" data-i18n="update.open_page"></button>
+    </div>
+  </div>
+</div>
+
+<div id="missingModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 data-i18n="missing.title"></h2>
+      <button id="missingClose" class="btn icon" data-i18n-title="common.close">✕</button>
+    </div>
+    <div class="modal-body">
+      <ul id="missingList" class="help-list"></ul>
+      <p class="muted small" data-i18n="missing.hint"></p>
     </div>
   </div>
 </div>

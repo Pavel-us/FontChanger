@@ -7,12 +7,13 @@
 use crate::fonts::{self, Counts, FontRule, Probe, Rules, SizeRule};
 use encoding_rs::WINDOWS_1251;
 use rayon::prelude::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use walkdir::WalkDir;
@@ -31,6 +32,11 @@ pub struct Rule {
     pub to_font: String,
     pub from_size: String,
     pub to_size: String,
+    /// Where the rule applies: empty means every part, otherwise one part group
+    /// of a Word file ("body", "headers", "footers", "footnotes", "endnotes", "comments", "styles").
+    pub scope: String,
+    /// Only paragraphs of this Word style (id or built-in name, case-insensitive); empty = any.
+    pub style: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -98,6 +104,11 @@ pub fn compile(rules: &[Rule], o: &Request) -> Result<Rules, String> {
     if rules.is_empty() {
         return Err("err.no_rules".into());
     }
+    for (i, r) in rules.iter().enumerate() {
+        if !r.scope.is_empty() && !SCOPE_NAMES.contains(&r.scope.as_str()) {
+            return Err(format!("err.scope\u{1f}{}", i + 1));
+        }
+    }
     let mut out = Rules {
         scripts: o.scripts,
         keep_symbols: o.keep_symbols,
@@ -133,6 +144,92 @@ pub fn compile(rules: &[Rule], o: &Request) -> Result<Rules, String> {
     out.fonts.sort_by_key(|r| r.from.is_none());
     out.sizes.sort_by_key(|r| r.from.is_none());
     Ok(out)
+}
+
+/// Part groups a scope may name. Excel, PowerPoint and LibreOffice files have no scoped parts:
+/// a scoped rule simply applies to the whole file there.
+pub const SCOPE_NAMES: [&str; 7] = ["body", "headers", "footers", "footnotes", "endnotes", "comments", "styles"];
+
+/// Which group of parts a file entry belongs to; empty = a part no scope names.
+fn part_scope(name: &str) -> &'static str {
+    let Some(rest) = name.strip_prefix("word/") else {
+        return "";
+    };
+    if rest.contains('/') || !rest.ends_with(".xml") {
+        return "";
+    }
+    match rest {
+        "document.xml" => "body",
+        "footnotes.xml" => "footnotes",
+        "endnotes.xml" => "endnotes",
+        "comments.xml" => "comments",
+        "styles.xml" => "styles",
+        r if r.starts_with("header") => "headers",
+        r if r.starts_with("footer") => "footers",
+        _ => "",
+    }
+}
+
+/// Several rule groups in priority order: what the first group decides is final, later groups only
+/// handle what the earlier ones did not touch. Inside one group the usual order holds
+/// (rules with a source font or size first, "any" rules last).
+fn compose(groups: &[&[Rule]], o: &Request) -> Result<Rules, String> {
+    let mut acc: Option<Rules> = None;
+    for g in groups {
+        if g.is_empty() {
+            continue;
+        }
+        let r = compile(g, o)?;
+        acc = Some(match acc.take() {
+            None => r,
+            Some(mut a) => {
+                a.fonts.extend(r.fonts);
+                a.sizes.extend(r.sizes);
+                a
+            }
+        });
+    }
+    Ok(acc.unwrap_or_default())
+}
+
+/// Compiled style rules: (lower-case style key, rules for paragraphs of that style).
+type Styled = Vec<(String, Rules)>;
+
+/// Everything a run needs: the rules that apply everywhere, one set per part group that has rules of its own,
+/// and one set per paragraph style that has rules of its own.
+///
+/// Priority, highest first:
+///  1. rules limited to a paragraph style (paragraphs of that style in the body),
+///  2. rules limited to an area (headers, footers, …; the body area also covers styled paragraphs),
+///  3. rules that apply everywhere.
+///
+/// A rule with a `style` applies to paragraphs of that style only; its `scope` is not used.
+fn compile_scoped(rules: &[Rule], o: &Request) -> Result<(Rules, HashMap<&'static str, Rules>, Styled), String> {
+    // validate the whole list once, so that an error names the number the user sees in the list
+    compile(rules, o)?;
+
+    let plain: Vec<Rule> = rules.iter().filter(|r| r.scope.is_empty() && r.style.trim().is_empty()).cloned().collect();
+    let base = compose(&[plain.as_slice()], o)?;
+
+    let mut scoped: HashMap<&'static str, Rules> = HashMap::new();
+    for g in SCOPE_NAMES {
+        let own: Vec<Rule> = rules.iter().filter(|r| r.scope == g && r.style.trim().is_empty()).cloned().collect();
+        if own.is_empty() {
+            continue;
+        }
+        scoped.insert(g, compose(&[own.as_slice(), plain.as_slice()], o)?);
+    }
+
+    let body: Vec<Rule> = rules.iter().filter(|r| r.scope == "body" && r.style.trim().is_empty()).cloned().collect();
+    let mut keys: Vec<String> = rules.iter().map(|r| r.style.trim().to_lowercase()).filter(|k| !k.is_empty()).collect();
+    keys.sort();
+    keys.dedup();
+    let mut styled: Styled = Vec::new();
+    for key in keys {
+        let own: Vec<Rule> = rules.iter().filter(|r| r.style.trim().to_lowercase() == key).cloned().collect();
+        styled.push((key, compose(&[own.as_slice(), body.as_slice(), plain.as_slice()], o)?));
+    }
+    Ok((base, scoped, styled))
 }
 
 // ───────────── writing files ─────────────
@@ -335,6 +432,18 @@ fn slide_route(name: &str) -> Option<Route> {
     None
 }
 
+/// Chart and SmartArt parts. Their text properties are DrawingML (`a:rPr`, `a:defRPr`, `a:latin typeface`),
+/// so slides' code handles them too. `colors*.xml` and `style*.xml` hold no fonts and are left out.
+fn is_chart_or_diagram(name: &str) -> bool {
+    let dirs = ["word/charts/", "word/diagrams/", "xl/charts/", "ppt/charts/", "ppt/diagrams/"];
+    let Some(rest) = dirs.iter().find_map(|d| name.strip_prefix(d)) else {
+        return false;
+    };
+    !rest.contains('/')
+        && rest.ends_with(".xml")
+        && (rest.starts_with("chart") || rest.starts_with("data") || rest.starts_with("drawing"))
+}
+
 fn route(kind: Kind, name: &str) -> Option<Route> {
     match kind {
         Kind::Word => {
@@ -342,6 +451,8 @@ fn route(kind: Kind, name: &str) -> Option<Route> {
                 Some(Route::Theme)
             } else if is_word_part(name) {
                 Some(Route::Word)
+            } else if is_chart_or_diagram(name) {
+                Some(Route::DrawingMl)
             } else {
                 None
             }
@@ -365,6 +476,8 @@ fn route(kind: Kind, name: &str) -> Option<Route> {
                 } else {
                     None
                 }
+            } else if is_chart_or_diagram(name) {
+                Some(Route::DrawingMl)
             } else {
                 None
             }
@@ -372,6 +485,8 @@ fn route(kind: Kind, name: &str) -> Option<Route> {
         Kind::Slides => {
             if name.starts_with("ppt/theme/") && name.ends_with(".xml") {
                 Some(Route::Theme)
+            } else if is_chart_or_diagram(name) {
+                Some(Route::DrawingMl)
             } else {
                 slide_route(name)
             }
@@ -412,8 +527,101 @@ enum Outcome {
     Skipped(String),
 }
 
-fn process_zip_doc(kind: Kind, path: &Path, meta: &fs::Metadata, r: &Rules, o: &Request) -> Res<Outcome> {
+/// What `word/styles.xml` says about paragraph styles.
+#[derive(Default)]
+struct StyleInfo {
+    /// styleId (lower-case) -> style name (lower-case)
+    names: HashMap<String, String>,
+    /// id (lower-case) of the style that paragraphs without `w:pStyle` have ("Normal" in nearly every file)
+    default_id: String,
+}
+
+fn read_style_info(ar: &mut zip::ZipArchive<fs::File>) -> StyleInfo {
+    let mut info = StyleInfo { default_id: "normal".to_string(), ..Default::default() };
+    let Ok(mut f) = ar.by_name("word/styles.xml") else {
+        return info;
+    };
+    let mut xml = String::new();
+    if f.read_to_string(&mut xml).is_err() {
+        return info;
+    }
+    let (Ok(style), Ok(id), Ok(name)) = (
+        Regex::new(r"(?s)<w:style\b([^>]*)>(.*?)</w:style>"),
+        Regex::new(r#"w:styleId="([^"]+)""#),
+        Regex::new(r#"<w:name\s+w:val="([^"]+)""#),
+    ) else {
+        return info;
+    };
+    for caps in style.captures_iter(&xml) {
+        let attrs = &caps[1];
+        let Some(idc) = id.captures(attrs) else {
+            continue;
+        };
+        let key = idc[1].to_lowercase();
+        if attrs.contains(r#"w:type="paragraph""#) && attrs.contains(r#"w:default="1""#) {
+            info.default_id = key.clone();
+        }
+        let value = name.captures(&caps[2]).map(|c| c[1].to_lowercase()).unwrap_or_default();
+        info.names.insert(key, value);
+    }
+    info
+}
+
+fn push_processed(out: &mut String, total: &mut Counts, chunk: &str, rules: &Rules) {
+    let (changed, c) = fonts::word_part(chunk, "word/document.xml", rules);
+    out.push_str(&changed);
+    total.add(c);
+}
+
+/// The body of a Word file when some rules are limited to a paragraph style.
+/// A paragraph of such a style is handled by that style's rules (which come first) and nothing else touches it;
+/// every other paragraph, and everything between paragraphs, is handled by `base`.
+/// A style is matched by its id (`Heading1`) or by its name (`heading 1`), case-insensitively;
+/// paragraphs without `w:pStyle` have the default style (usually `Normal`).
+fn process_document_styled(xml: &str, base: &Rules, styled: &[(String, Rules)], info: &StyleInfo) -> (String, Counts) {
+    let (Ok(para), Ok(ps)) = (
+        Regex::new(r"(?s)<w:p(?:\s(?:[^>/]|/[^>])*)?>.*?</w:p>"),
+        Regex::new(r#"<w:pStyle\s+w:val="([^"]+)""#),
+    ) else {
+        return fonts::word_part(xml, "word/document.xml", base);
+    };
+    let mut total = Counts::default();
+    let mut out = String::with_capacity(xml.len() + 64);
+    let mut last = 0;
+    for m in para.find_iter(xml) {
+        let text = m.as_str();
+        let id = match ps.captures(text) {
+            Some(c) => c[1].to_lowercase(),
+            None => info.default_id.clone(),
+        };
+        let name = info.names.get(&id).cloned().unwrap_or_default();
+        let rules = styled
+            .iter()
+            .find(|(key, _)| *key == id || (!name.is_empty() && *key == name))
+            .map(|(_, r)| r);
+        let Some(rules) = rules else {
+            continue; // stays in the stretch that `base` handles
+        };
+        push_processed(&mut out, &mut total, &xml[last..m.start()], base);
+        push_processed(&mut out, &mut total, text, rules);
+        last = m.end();
+    }
+    push_processed(&mut out, &mut total, &xml[last..], base);
+    (out, total)
+}
+
+fn process_zip_doc(
+    kind: Kind,
+    path: &Path,
+    meta: &fs::Metadata,
+    r: &Rules,
+    scoped: &HashMap<&'static str, Rules>,
+    styled: &[(String, Rules)],
+    o: &Request,
+) -> Res<Outcome> {
     let mut ar = zip::ZipArchive::new(fs::File::open(path)?)?;
+    // style names are only read when a rule is limited to a paragraph style
+    let info = if kind == Kind::Word && !styled.is_empty() { read_style_info(&mut ar) } else { StyleInfo::default() };
     // (name, data, is_dir, compression) — order and compression are preserved (matters for ODF: mimetype)
     let mut items: Vec<(String, Vec<u8>, bool, CompressionMethod)> = Vec::new();
     let mut total = Counts::default();
@@ -427,7 +635,13 @@ fn process_zip_doc(kind: Kind, path: &Path, meta: &fs::Metadata, r: &Rules, o: &
             f.read_to_end(&mut buf)?;
             if let Some(rt) = route(kind, &name) {
                 if let Ok(xml) = std::str::from_utf8(&buf) {
-                    let (new, c) = process_part(rt, &name, xml, r);
+                    // a scoped rule only applies inside its own parts; everything else applies everywhere
+                    let rule_set = scoped.get(part_scope(&name)).unwrap_or(r);
+                    let (new, c) = if kind == Kind::Word && name == "word/document.xml" && !styled.is_empty() {
+                        process_document_styled(xml, rule_set, styled, &info)
+                    } else {
+                        process_part(rt, &name, xml, rule_set)
+                    };
                     if c.total() > 0 {
                         total.add(c);
                         buf = new.into_bytes();
@@ -541,7 +755,13 @@ fn parse_masks(mask: &str) -> Vec<Vec<char>> {
     }
 }
 
-fn process_file(path: &Path, r: &Rules, o: &Request) -> Result<Outcome, String> {
+fn process_file(
+    path: &Path,
+    r: &Rules,
+    scoped: &HashMap<&'static str, Rules>,
+    styled: &[(String, Rules)],
+    o: &Request,
+) -> Result<Outcome, String> {
     let meta = fs::metadata(path).map_err(|e| e.to_string())?;
     if o.max_size_mb > 0 && meta.len() > o.max_size_mb.saturating_mul(1024 * 1024) {
         return Ok(Outcome::Skipped(format!("skip.too_big\u{1f}{}", o.max_size_mb)));
@@ -550,7 +770,7 @@ fn process_file(path: &Path, r: &Rules, o: &Request) -> Result<Outcome, String> 
         FileKind::Legacy => return Ok(Outcome::Skipped("skip.legacy".into())),
         FileKind::Pdf => return Ok(Outcome::Skipped("skip.pdf".into())),
         FileKind::Other => return Ok(Outcome::Unchanged),
-        FileKind::Zip(kind) => process_zip_doc(kind, path, &meta, r, o),
+        FileKind::Zip(kind) => process_zip_doc(kind, path, &meta, r, scoped, styled, o),
         FileKind::Rtf => process_rtf(path, &meta, r, o),
         FileKind::Web => process_web(path, &meta, r, o),
     };
@@ -591,7 +811,7 @@ pub fn run<F>(o: &Request, emit: F) -> Result<Stats, String>
 where
     F: Fn(FileEvent) + Sync,
 {
-    let rules = compile(&o.rules, o)?;
+    let (rules, scoped, styled) = compile_scoped(&o.rules, o)?;
     let files = list_files(o)?;
 
     let changed = AtomicUsize::new(0);
@@ -609,7 +829,7 @@ where
         files.par_iter().for_each(|p| {
             let path = p.to_string_lossy().to_string();
             // a bug in one file must not take the whole application down
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process_file(p, &rules, o)))
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process_file(p, &rules, &scoped, &styled, o)))
                 .unwrap_or_else(|_| Err("err.internal".to_string()));
             match res {
                 Ok(Outcome::Unchanged) => {}
@@ -646,6 +866,266 @@ where
         skipped: skipped.load(Ordering::Relaxed),
         errors: errors.load(Ordering::Relaxed),
     })
+}
+
+// ───────────── verify: what survived a run? ─────────────
+
+/// Something a run could not change: the same rules would change it again.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Residual {
+    pub path: String,
+    /// fonts that still match a rule, as they are written in the file
+    pub fonts: Vec<String>,
+    /// sizes in points that still match a rule
+    pub sizes: Vec<f64>,
+    /// where the text probably hides: "embeddings", "media" or empty
+    pub hint: String,
+}
+
+/// Lists what the rules would still change in the files they select. Nothing is written.
+/// Run it after a real run: whatever is left is text the engine cannot reach
+/// (an embedded object, a picture with text, a chart in an old format).
+pub fn verify(o: &Request) -> Result<Vec<Residual>, String> {
+    // The check works per file, not per part, so scoped rules are left out:
+    // reporting them here would claim leftovers that a scoped run leaves on purpose.
+    let plain: Vec<Rule> = o
+        .rules
+        .iter()
+        .filter(|r| r.scope.is_empty() && r.style.trim().is_empty())
+        .cloned()
+        .collect();
+    if plain.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rules = compile(&plain, o)?;
+    let files = list_files(o)?;
+    let found = Mutex::new(Vec::new());
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .stack_size(16 * 1024 * 1024)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    pool.install(|| {
+        files.par_iter().for_each(|p| {
+            let Ok(Some(probe)) = scan_file(p, o) else {
+                return;
+            };
+            let mut fonts: Vec<String> = probe
+                .fonts
+                .values()
+                .filter(|(name, latin, symbol)| rules.font_for_ext(name, *latin, *symbol).is_some())
+                .map(|(name, _, _)| name.clone())
+                .collect();
+            let mut sizes: Vec<f64> = probe
+                .sizes
+                .iter()
+                .filter(|(&h, &ctx)| rules.size_for_ctx(Some(h as f64 / 100.0), ctx).is_some())
+                .map(|(&h, _)| h as f64 / 100.0)
+                .collect();
+            if fonts.is_empty() && sizes.is_empty() {
+                return;
+            }
+            fonts.sort();
+            fonts.dedup();
+            sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sizes.dedup();
+            if let Ok(mut g) = found.lock() {
+                g.push(Residual { path: p.to_string_lossy().to_string(), fonts, sizes, hint: leftover_hint(p) });
+            }
+        });
+    });
+
+    let mut v = found.into_inner().unwrap_or_default();
+    v.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(v)
+}
+
+/// Where text can hide from the engine: embedded objects and pictures.
+fn leftover_hint(path: &Path) -> String {
+    if !matches!(file_kind(path), FileKind::Zip(_)) {
+        return String::new();
+    }
+    let Ok(mut z) = zip::ZipArchive::new(match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    }) else {
+        return String::new();
+    };
+    let (mut emb, mut media) = (false, false);
+    for i in 0..z.len() {
+        let Ok(f) = z.by_index(i) else { continue };
+        let n = f.name();
+        if n.contains("/embeddings/") {
+            emb = true;
+        } else if n.contains("/media/") {
+            media = true;
+        }
+    }
+    if emb {
+        "embeddings".into()
+    } else if media {
+        "media".into()
+    } else {
+        String::new()
+    }
+}
+
+// ───────────── missing system fonts ─────────────
+
+/// A font the selected files use that this machine does not have.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MissingFont {
+    pub name: String,
+    /// how many files use it
+    pub files: usize,
+}
+
+/// Family names installed here, lower-cased.
+pub fn installed_families() -> HashSet<String> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    db.faces()
+        .flat_map(|f| f.families.iter().map(|(name, _)| name.to_lowercase()))
+        .collect()
+}
+
+/// Pure part of the check, so it can be tested without a system font list.
+fn missing(found: &[FontInfo], installed: &HashSet<String>) -> Vec<MissingFont> {
+    let mut out: Vec<MissingFont> = found
+        .iter()
+        .filter(|f| !f.symbol && !f.invalid)
+        .filter(|f| !installed.contains(&f.name.to_lowercase()))
+        .map(|f| MissingFont { name: f.name.clone(), files: f.files })
+        .collect();
+    out.sort_by(|a, b| b.files.cmp(&a.files).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// Scans the folder and lists the fonts that are not installed on this machine.
+pub fn missing_fonts<C>(o: &Request, cancelled: C) -> Result<Vec<MissingFont>, String>
+where
+    C: Fn() -> bool + Sync,
+{
+    let result = scan(o, cancelled)?;
+    Ok(missing(&result.fonts, &installed_families()))
+}
+
+// ───────────── sample: copy font and size from a reference document ─────────────
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Sample {
+    /// most used first: font name as it is written in the file, and how many slots use it
+    pub fonts: Vec<(String, usize)>,
+    /// most used first: size in points, and how many slots use it
+    pub sizes: Vec<(f64, usize)>,
+}
+
+/// Counts how many font and size slots one file has for the given rules.
+fn count_in_file(path: &Path, r: &Rules) -> Result<Counts, String> {
+    match file_kind(path) {
+        FileKind::Zip(kind) => count_zip_doc(kind, path, r).map_err(|e| e.to_string()),
+        FileKind::Rtf => {
+            let data = fs::read(path).map_err(|e| e.to_string())?;
+            Ok(fonts::rtf_part(&data, r).1)
+        }
+        FileKind::Web => {
+            let data = fs::read(path).map_err(|e| e.to_string())?;
+            let (text, _) = decode(&data);
+            Ok(fonts::web_text(&text, r).1)
+        }
+        _ => Ok(Counts::default()),
+    }
+}
+
+/// Same walk as `scan_zip_doc`, but keeps the counts: one rule, one file.
+fn count_zip_doc(kind: Kind, path: &Path, r: &Rules) -> Res<Counts> {
+    let mut total = Counts::default();
+    let mut ar = zip::ZipArchive::new(fs::File::open(path)?)?;
+    for i in 0..ar.len() {
+        let mut f = ar.by_index(i)?;
+        if f.is_dir() {
+            continue;
+        }
+        let name = f.name().to_string();
+        if let Some(rt) = route(kind, &name) {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf)?;
+            if let Ok(xml) = std::str::from_utf8(&buf) {
+                let (_, c) = process_part(rt, &name, xml, r);
+                total.fonts += c.fonts;
+                total.sizes += c.sizes;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Reads one document and returns the fonts and sizes it uses, most used first.
+/// The UI takes the first entry of each list as "the look of this document".
+pub fn sample(path: &str) -> Result<Sample, String> {
+    let p = Path::new(path);
+    let probe = scan_file(p, &Request { max_size_mb: 0, ..Default::default() })?
+        .ok_or_else(|| "err.sample_empty".to_string())?;
+
+    let mut fonts = Vec::new();
+    for (low, (name, latin, symbol)) in &probe.fonts {
+        // symbol fonts and fonts of Asian scripts are not what a template is about
+        if *symbol || !*latin {
+            continue;
+        }
+        let r = Rules {
+            fonts: vec![FontRule { from: Some(low.clone()), to: "sample".into() }],
+            ..Default::default()
+        };
+        let c = count_in_file(p, &r)?;
+        if c.fonts > 0 {
+            fonts.push((name.clone(), c.fonts));
+        }
+    }
+    fonts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut sizes = Vec::new();
+    for (&h, &flags) in &probe.sizes {
+        if flags & fonts::CTX_HIDDEN != 0 && flags & (fonts::CTX_TEXT | fonts::CTX_STYLE) == 0 {
+            continue; // paragraph marks and other invisible sizes are not "the look of the document"
+        }
+        let pt = h as f64 / 100.0;
+        let r = Rules {
+            sizes: vec![SizeRule { from: Some(pt), to: pt + 1.0 }],
+            ..Default::default()
+        };
+        let c = count_in_file(p, &r)?;
+        if c.sizes > 0 {
+            sizes.push((pt, c.sizes));
+        }
+    }
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)));
+
+    Ok(Sample { fonts, sizes })
+}
+
+// ───────────── report: the results table as a file ─────────────
+
+/// One row of the results table, as the UI sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportRow {
+    pub path: String,
+    pub count: String,
+    pub status: String,
+}
+
+/// Writes the results as CSV. UTF-8 with a BOM, so Excel shows Cyrillic as Cyrillic.
+pub fn write_report(path: &str, rows: &[ReportRow]) -> Result<String, String> {
+    fn esc(s: &str) -> String {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    }
+    let mut out = String::from("\u{feff}file,count,status\r\n");
+    for r in rows {
+        out.push_str(&format!("{},{},{}\r\n", esc(&r.path), esc(&r.count), esc(&r.status)));
+    }
+    fs::write(path, out).map_err(|e| e.to_string())?;
+    Ok(path.to_string())
 }
 
 // ───────────── scan: which fonts and sizes are there? ─────────────
@@ -843,7 +1323,7 @@ where
 // ───────────── rule templates (.fctpl) ─────────────
 
 pub const TEMPLATE_FORMAT: &str = "fctpl";
-pub const TEMPLATE_VERSION: u32 = 1;
+pub const TEMPLATE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -856,7 +1336,7 @@ pub struct TemplateOptions {
     pub min_size: Option<f64>,
 }
 
-/// A `.fctpl` file is JSON: `{ "format": "fctpl", "version": 1, "name": …, "mask": …, "options": {…}, "rules": […] }`.
+/// A `.fctpl` file is JSON: `{ "format": "fctpl", "version": 2, "name": …, "mask": …, "options": {…}, "rules": […] }`.
 /// Unknown fields are ignored, so newer files with extra data still load.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -916,12 +1396,156 @@ pub fn load_template(path: &str) -> Result<Template, String> {
         }
         let cols: Vec<&str> = line.split('\t').collect();
         let col = |i: usize| cols.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
-        rules.push(Rule { from_font: col(0), to_font: col(1), from_size: col(2), to_size: col(3) });
+        rules.push(Rule { from_font: col(0), to_font: col(1), from_size: col(2), to_size: col(3), ..Default::default() });
     }
     if rules.is_empty() {
         return Err("err.no_rules_in_file".into());
     }
     Ok(Template { format: TEMPLATE_FORMAT.into(), version: TEMPLATE_VERSION, rules, ..Default::default() })
+}
+
+// ───────────── command line ─────────────
+
+/// A headless run for scripts and schedulers:
+/// `font-changer --folder DIR --preset rules.fctpl [--report out.csv] [--mask M] [--dry] [--no-backup] [--flat]`
+#[derive(Debug, Default)]
+pub struct Cli {
+    pub request: Request,
+    pub report: Option<String>,
+}
+
+/// Only these arguments start the headless mode. Anything else (an argument added by the system or by a launcher)
+/// must not stop the window from opening.
+pub fn wants_cli(args: &[String]) -> bool {
+    args.iter().any(|a| matches!(a.as_str(), "--folder" | "--preset" | "--help" | "-h"))
+}
+
+pub fn cli_usage() -> &'static str {
+    "Font Changer without a window:\n\
+     \x20 font-changer --folder DIR --preset FILE.fctpl [--report OUT.csv] [--mask MASK] [--dry] [--no-backup] [--flat]\n\
+     \n\
+     \x20 --folder DIR       folder to process (required)\n\
+     \x20 --preset FILE      .fctpl with the rules (required); the mask and the options come from it\n\
+     \x20 --report FILE      write the results as CSV\n\
+     \x20 --mask MASK        use another mask, e.g. \"*.docx\"\n\
+     \x20 --dry              preview, nothing is written\n\
+     \x20 --no-backup        do not create .bak copies\n\
+     \x20 --flat             do not look into subfolders\n\
+     \n\
+     Exit code: 0 = done, 1 = some files failed, 2 = wrong arguments or rules."
+}
+
+/// Readable text for a message code ("err.cli_usage\u{1f}--x"); unknown codes are returned as they are.
+pub fn cli_message(code: &str) -> String {
+    let (key, arg) = match code.split_once('\u{1f}') {
+        Some((k, a)) => (k, a),
+        None => (code, ""),
+    };
+    match key {
+        "err.cli_usage" => format!("Missing or unknown argument: {arg}\n\n{}", cli_usage()),
+        "err.cli_value" => format!("{arg} needs a value\n\n{}", cli_usage()),
+        "err.folder_not_found" => "The folder was not found".to_string(),
+        "err.no_rules" | "err.no_rules_in_file" => "The preset contains no rules".to_string(),
+        "err.template_format" => "The preset is not a Font Changer template (.fctpl)".to_string(),
+        "err.template_version" => format!("The preset was made by a newer version of Font Changer (format {arg})"),
+        "err.template_parse" => format!("The preset file is damaged: {arg}"),
+        "err.rule_empty" => format!("Rule {arg}: nothing to change, set a new font or a new size"),
+        "err.rule_font_target" => format!("Rule {arg}: a source font is set but the new font is empty"),
+        "err.rule_size_target" => format!("Rule {arg}: a source size is set but the new size is empty"),
+        "err.size" => format!("Rule {arg}: the size must be a number from 1 to 1000"),
+        "err.font_name" => format!("Rule {arg}: the font name contains characters that are not allowed"),
+        "err.scope" => format!("Rule {arg}: unknown area"),
+        _ => code.replace('\u{1f}', ": "),
+    }
+}
+
+fn arg_value(args: &[String], i: &mut usize, key: &str) -> Result<String, String> {
+    *i += 1;
+    args.get(*i).cloned().ok_or_else(|| format!("err.cli_value\u{1f}{key}"))
+}
+
+/// Parses the command line. `None` = no arguments at all, so the window should open.
+pub fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+    let mut cli = Cli {
+        request: Request { backup: true, recursive: true, ..Default::default() },
+        report: None,
+    };
+    let mut preset: Option<String> = None;
+    let mut mask = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--folder" => cli.request.folder = arg_value(args, &mut i, "--folder")?,
+            "--preset" => preset = Some(arg_value(args, &mut i, "--preset")?),
+            "--report" => cli.report = Some(arg_value(args, &mut i, "--report")?),
+            "--mask" => mask = arg_value(args, &mut i, "--mask")?,
+            "--dry" => cli.request.dry = true,
+            "--no-backup" => cli.request.backup = false,
+            "--flat" => cli.request.recursive = false,
+            other => return Err(format!("err.cli_usage\u{1f}{other}")),
+        }
+        i += 1;
+    }
+    let Some(p) = preset else {
+        return Err("err.cli_usage\u{1f}--preset".into());
+    };
+    if cli.request.folder.is_empty() {
+        return Err("err.cli_usage\u{1f}--folder".into());
+    }
+    let tpl = load_template(&p)?;
+    cli.request.rules = tpl.rules;
+    cli.request.mask = if mask.is_empty() { tpl.mask.unwrap_or_default() } else { mask };
+    if cli.request.mask.trim().is_empty() {
+        cli.request.mask = "*".into();
+    }
+    if let Some(v) = tpl.options.keep_symbols {
+        cli.request.keep_symbols = v;
+    }
+    if let Some(v) = tpl.options.scripts {
+        cli.request.scripts = v;
+    }
+    if let Some(v) = tpl.options.min_size {
+        cli.request.min_size = v;
+    }
+    Ok(Some(cli))
+}
+
+/// Runs a command line request. `None` = no arguments, the window should open.
+/// Exit code: 0 = done, 1 = some files failed.
+pub fn run_cli(args: &[String]) -> Result<Option<i32>, String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", cli_usage());
+        return Ok(Some(0));
+    }
+    let Some(cli) = parse_cli(args)? else {
+        return Ok(None);
+    };
+    let events = Mutex::new(Vec::new());
+    let stats = run(&cli.request, |ev| {
+        if let Ok(mut g) = events.lock() {
+            g.push(ev);
+        }
+    })?;
+    let events = events.into_inner().unwrap_or_default();
+    if let Some(path) = &cli.report {
+        let rows: Vec<ReportRow> = events
+            .iter()
+            .map(|e| ReportRow {
+                path: e.path.clone(),
+                count: if e.count > 0 { e.count.to_string() } else { String::new() },
+                status: if e.info.is_empty() { e.status.clone() } else { format!("{}: {}", e.status, e.info) },
+            })
+            .collect();
+        write_report(path, &rows)?;
+    }
+    println!(
+        "files: {}, changed: {}, fonts: {}, sizes: {}, skipped: {}, errors: {}",
+        stats.files, stats.changed, stats.fonts, stats.sizes, stats.skipped, stats.errors
+    );
+    Ok(Some(if stats.errors > 0 { 1 } else { 0 }))
 }
 
 // ───────────── tests ─────────────
@@ -931,7 +1555,13 @@ mod tests {
     use super::*;
 
     fn rule(ff: &str, tf: &str, fs: &str, ts: &str) -> Rule {
-        Rule { from_font: ff.into(), to_font: tf.into(), from_size: fs.into(), to_size: ts.into() }
+        Rule {
+            from_font: ff.into(),
+            to_font: tf.into(),
+            from_size: fs.into(),
+            to_size: ts.into(),
+            ..Default::default()
+        }
     }
 
     fn req(rules: Vec<Rule>) -> Request {
@@ -992,6 +1622,484 @@ mod tests {
         assert!(matches!(file_kind(Path::new("a.pdf")), FileKind::Pdf));
         assert!(matches!(file_kind(Path::new("a.txt")), FileKind::Other));
         assert!(matches!(file_kind(Path::new("noext")), FileKind::Other));
+    }
+
+    fn write_zip(path: &Path, parts: &[(&str, &str)]) {
+        let f = fs::File::create(path).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, body) in parts {
+            z.start_file(*name, opts).unwrap();
+            z.write_all(body.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn run_changes_fonts_inside_charts() {
+        let dir = std::env::temp_dir().join(format!("fc-chart-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("a.docx");
+        write_zip(
+            &doc,
+            &[
+                ("[Content_Types].xml", "<Types/>"),
+                (
+                    "word/document.xml",
+                    r#"<w:document><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#,
+                ),
+                (
+                    "word/charts/chart1.xml",
+                    r#"<c:chartSpace><c:txPr><a:defRPr><a:latin typeface="Arial"/></a:defRPr></c:txPr></c:chartSpace>"#,
+                ),
+            ],
+        );
+        let o = Request {
+            folder: dir.to_string_lossy().into(),
+            mask: "*.docx".into(),
+            rules: vec![rule("Arial", "Calibri", "", "")],
+            recursive: true,
+            backup: false,
+            keep_symbols: true,
+            ..Default::default()
+        };
+        let stats = run(&o, |_| {}).unwrap();
+        assert_eq!(stats.changed, 1);
+        // ascii + hAnsi in the body, plus the typeface inside the chart
+        assert_eq!(stats.fonts, 3, "body and chart must both be rewritten");
+
+        let mut z = zip::ZipArchive::new(fs::File::open(&doc).unwrap()).unwrap();
+        let mut chart = String::new();
+        z.by_name("word/charts/chart1.xml").unwrap().read_to_string(&mut chart).unwrap();
+        assert!(chart.contains(r#"typeface="Calibri""#), "chart kept the old font: {chart}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_lists_leftovers_and_is_empty_after_run() {
+        let dir = std::env::temp_dir().join(format!("fc-verify-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        write_zip(
+            &dir.join("a.docx"),
+            &[
+                ("[Content_Types].xml", "<Types/>"),
+                (
+                    "word/document.xml",
+                    r#"<w:document><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#,
+                ),
+            ],
+        );
+        let o = Request {
+            folder: dir.to_string_lossy().into(),
+            mask: "*.docx".into(),
+            rules: vec![rule("Arial", "Calibri", "", "")],
+            recursive: true,
+            backup: false,
+            keep_symbols: true,
+            ..Default::default()
+        };
+        let left = verify(&o).unwrap();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!(left[0].fonts, vec!["Arial".to_string()]);
+        run(&o, |_| {}).unwrap();
+        assert!(verify(&o).unwrap().is_empty(), "nothing must be left after a successful run");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sample_picks_the_most_used_font_and_size() {
+        let dir = std::env::temp_dir().join(format!("fc-sample-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("sample.docx");
+        let para = |font: &str, sz: &str, text: &str| {
+            format!(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{font}" w:hAnsi="{font}"/><w:sz w:val="{sz}"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let body = format!(
+            "<w:document><w:body>{}{}{}</w:body></w:document>",
+            para("Arial", "24", "a"),
+            para("Arial", "24", "b"),
+            para("Calibri", "28", "c")
+        );
+        write_zip(&doc, &[("[Content_Types].xml", "<Types/>"), ("word/document.xml", body.as_str())]);
+
+        let s = sample(&doc.to_string_lossy()).unwrap();
+        assert_eq!(s.fonts[0].0, "Arial", "{s:?}");
+        assert!(s.fonts[0].1 > s.fonts[1].1, "{s:?}");
+        assert_eq!(s.sizes[0].0, 12.0, "{s:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn report_is_written_as_csv_with_bom() {
+        let dir = std::env::temp_dir().join(format!("fc-report-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("report.csv");
+        let rows = vec![ReportRow {
+            path: "a,\"b\".docx".into(),
+            count: "2".into(),
+            status: "changed: fonts 2, sizes 0".into(),
+        }];
+        write_report(&p.to_string_lossy(), &rows).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with('\u{feff}'), "BOM keeps Cyrillic readable in Excel");
+        assert!(text.contains("\"a,\"\"b\"\".docx\""), "{text}");
+        assert!(text.contains("\"2\""));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scope_limits_a_rule_to_its_parts() {
+        let dir = std::env::temp_dir().join(format!("fc-scope-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("a.docx");
+        let run_text = |text: &str| {
+            format!(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let body = format!("<w:document><w:body>{}</w:body></w:document>", run_text("body"));
+        let head = format!("<w:hdr>{}</w:hdr>", run_text("head"));
+        write_zip(
+            &doc,
+            &[
+                ("[Content_Types].xml", "<Types/>"),
+                ("word/document.xml", body.as_str()),
+                ("word/header1.xml", head.as_str()),
+            ],
+        );
+        let o = Request {
+            folder: dir.to_string_lossy().into(),
+            mask: "*.docx".into(),
+            rules: vec![Rule {
+                from_font: "Arial".into(),
+                to_font: "Calibri".into(),
+                scope: "headers".into(),
+                ..Default::default()
+            }],
+            recursive: true,
+            backup: false,
+            keep_symbols: true,
+            ..Default::default()
+        };
+        run(&o, |_| {}).unwrap();
+
+        let mut z = zip::ZipArchive::new(fs::File::open(&doc).unwrap()).unwrap();
+        let mut body_xml = String::new();
+        z.by_name("word/document.xml").unwrap().read_to_string(&mut body_xml).unwrap();
+        let mut head_xml = String::new();
+        z.by_name("word/header1.xml").unwrap().read_to_string(&mut head_xml).unwrap();
+        assert!(body_xml.contains("Arial"), "the body must stay as it is: {body_xml}");
+        assert!(head_xml.contains("Calibri"), "the header must change: {head_xml}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_scope_is_rejected() {
+        let o = req(vec![]);
+        let r = Rule {
+            from_font: "Arial".into(),
+            to_font: "Calibri".into(),
+            scope: "sidebar".into(),
+            ..Default::default()
+        };
+        assert_eq!(compile(&[r], &o).unwrap_err(), "err.scope\u{1f}1");
+    }
+
+    #[test]
+    fn template_v2_keeps_the_scope() {
+        let dir = std::env::temp_dir().join(format!("fc-tpl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.fctpl");
+        let tpl = Template {
+            rules: vec![Rule {
+                from_font: "Arial".into(),
+                to_font: "Calibri".into(),
+                scope: "footers".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let written = save_template(&p.to_string_lossy(), tpl).unwrap();
+        let back = load_template(&written).unwrap();
+        assert_eq!(back.version, 2);
+        assert_eq!(back.rules[0].scope, "footers");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_run_changes_files_and_writes_a_report() {
+        let dir = std::env::temp_dir().join(format!("fc-cli-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("a.docx");
+        write_zip(
+            &doc,
+            &[
+                ("[Content_Types].xml", "<Types/>"),
+                (
+                    "word/document.xml",
+                    r#"<w:document><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#,
+                ),
+            ],
+        );
+        let preset = dir.join("p.fctpl");
+        save_template(
+            &preset.to_string_lossy(),
+            Template { rules: vec![rule("Arial", "Calibri", "", "")], ..Default::default() },
+        )
+        .unwrap();
+        let report = dir.join("r.csv");
+        let args: Vec<String> = vec![
+            "--folder".into(),
+            dir.to_string_lossy().to_string(),
+            "--preset".into(),
+            preset.to_string_lossy().to_string(),
+            "--report".into(),
+            report.to_string_lossy().to_string(),
+            "--mask".into(),
+            "*.docx".into(),
+        ];
+        assert_eq!(run_cli(&args).unwrap(), Some(0));
+
+        let text = fs::read_to_string(&report).unwrap();
+        assert!(text.contains("ok") && text.contains("a.docx"), "{text}");
+        let mut z = zip::ZipArchive::new(fs::File::open(&doc).unwrap()).unwrap();
+        let mut xml = String::new();
+        z.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+        assert!(xml.contains("Calibri"), "{xml}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_fonts_are_the_ones_not_installed() {
+        let found = vec![
+            FontInfo { name: "Arial".into(), files: 3, ..Default::default() },
+            FontInfo { name: "Calibri".into(), files: 1, ..Default::default() },
+            FontInfo { name: "Wingdings".into(), files: 2, symbol: true, ..Default::default() },
+            FontInfo { name: "inherit".into(), files: 1, invalid: true, ..Default::default() },
+        ];
+        let installed: HashSet<String> = ["arial".to_string()].into_iter().collect();
+        let list = missing(&found, &installed);
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!(list[0].name, "Calibri");
+    }
+
+    #[test]
+    fn installed_families_are_lower_case() {
+        for name in installed_families() {
+            assert_eq!(name, name.to_lowercase(), "{name}");
+        }
+    }
+
+    #[test]
+    fn style_rule_touches_only_that_style() {
+        let dir = std::env::temp_dir().join(format!("fc-style-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("a.docx");
+        let run_text = |text: &str| {
+            format!(
+                r#"<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{text}</w:t></w:r>"#
+            )
+        };
+        let body = format!(
+            "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>{}</w:p><w:p>{}</w:p></w:body></w:document>",
+            run_text("head"),
+            run_text("body")
+        );
+        let styles = r#"<w:styles><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>"#;
+        write_zip(
+            &doc,
+            &[
+                ("[Content_Types].xml", "<Types/>"),
+                ("word/document.xml", body.as_str()),
+                ("word/styles.xml", styles),
+            ],
+        );
+        let o = Request {
+            folder: dir.to_string_lossy().into(),
+            mask: "*.docx".into(),
+            rules: vec![Rule {
+                from_font: "Arial".into(),
+                to_font: "Calibri".into(),
+                style: "heading 1".into(),
+                ..Default::default()
+            }],
+            recursive: true,
+            backup: false,
+            keep_symbols: true,
+            ..Default::default()
+        };
+        run(&o, |_| {}).unwrap();
+
+        let mut z = zip::ZipArchive::new(fs::File::open(&doc).unwrap()).unwrap();
+        let mut xml = String::new();
+        z.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+        assert_eq!(xml.matches("Calibri").count(), 2, "the heading must change: {xml}");
+        assert_eq!(xml.matches("Arial").count(), 2, "the body must stay: {xml}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn two_part_docx(path: &Path, body_paragraphs: &str, header: &str) {
+        let body = format!("<w:document><w:body>{body_paragraphs}</w:body></w:document>");
+        let head = format!("<w:hdr>{header}</w:hdr>");
+        write_zip(
+            path,
+            &[("[Content_Types].xml", "<Types/>"), ("word/document.xml", body.as_str()), ("word/header1.xml", head.as_str())],
+        );
+    }
+
+    fn read_part(path: &Path, name: &str) -> String {
+        let mut z = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+        let mut s = String::new();
+        z.by_name(name).unwrap().read_to_string(&mut s).unwrap();
+        s
+    }
+
+    fn calibri_run(text: &str) -> String {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="40"/></w:rPr><w:t>{text}</w:t></w:r>"#
+        )
+    }
+
+    #[test]
+    fn area_rule_beats_the_general_rule() {
+        let dir = temp_dir("area-priority");
+        let doc = dir.join("a.docx");
+        two_part_docx(&doc, &format!("<w:p>{}</w:p>", calibri_run("body")), &format!("<w:p>{}</w:p>", calibri_run("head")));
+        let mut o = req(vec![
+            rule("", "Times New Roman", "", ""),
+            Rule { to_font: "Arial".into(), scope: "headers".into(), ..Default::default() },
+        ]);
+        o.folder = dir.to_string_lossy().to_string();
+        run(&o, |_| {}).unwrap();
+        let body = read_part(&doc, "word/document.xml");
+        let head = read_part(&doc, "word/header1.xml");
+        assert_eq!(body.matches("Times New Roman").count(), 2, "{body}");
+        assert_eq!(head.matches("Arial").count(), 2, "{head}");
+        assert!(!head.contains("Times New Roman"), "{head}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn style_rule_beats_the_general_rule_and_nothing_is_counted_twice() {
+        let dir = temp_dir("style-priority");
+        let doc = dir.join("a.docx");
+        let heading = format!(r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>{}</w:p>"#, calibri_run("head"));
+        let plain = format!("<w:p>{}</w:p>", calibri_run("body"));
+        two_part_docx(&doc, &format!("{heading}{plain}"), "");
+        let mut o = req(vec![
+            rule("", "Times New Roman", "", "14"),
+            Rule { to_font: "Arial".into(), to_size: "16".into(), style: "Heading1".into(), ..Default::default() },
+        ]);
+        o.folder = dir.to_string_lossy().to_string();
+        let stats = run(&o, |_| {}).unwrap();
+        let body = read_part(&doc, "word/document.xml");
+        assert_eq!(body.matches("Arial").count(), 2, "heading: {body}");
+        assert_eq!(body.matches("Times New Roman").count(), 2, "body: {body}");
+        assert_eq!(body.matches(r#"w:val="32""#).count(), 1, "{body}");
+        assert_eq!(body.matches(r#"w:val="28""#).count(), 1, "{body}");
+        assert_eq!((stats.fonts, stats.sizes), (4, 2), "every change counted once");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_style_rule_beats_explicit_general_rule() {
+        let dir = temp_dir("style-explicit");
+        let doc = dir.join("a.docx");
+        let arial = |t: &str| {
+            format!(r#"<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{t}</w:t></w:r>"#)
+        };
+        let heading = format!(r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>{}</w:p>"#, arial("head"));
+        let plain = format!("<w:p>{}</w:p>", arial("body"));
+        two_part_docx(&doc, &format!("{heading}{plain}"), "");
+        let mut o = req(vec![
+            rule("Arial", "Verdana", "", ""),
+            Rule { from_font: "Arial".into(), to_font: "Calibri".into(), style: "Heading1".into(), ..Default::default() },
+        ]);
+        o.folder = dir.to_string_lossy().to_string();
+        run(&o, |_| {}).unwrap();
+        let body = read_part(&doc, "word/document.xml");
+        assert_eq!(body.matches("Calibri").count(), 2, "heading: {body}");
+        assert_eq!(body.matches("Verdana").count(), 2, "body: {body}");
+        assert!(!body.contains("Arial"), "{body}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normal_style_rule_reaches_paragraphs_without_a_style() {
+        let dir = temp_dir("style-normal");
+        let doc = dir.join("a.docx");
+        let arial = |t: &str| {
+            format!(r#"<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{t}</w:t></w:r>"#)
+        };
+        let heading = format!(r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>{}</w:p>"#, arial("head"));
+        let plain = format!("<w:p>{}</w:p>", arial("body"));
+        let styles = concat!(
+            r#"<w:styles><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+            r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>"#
+        );
+        let body_xml = format!("<w:document><w:body>{heading}{plain}</w:body></w:document>");
+        write_zip(
+            &doc,
+            &[("[Content_Types].xml", "<Types/>"), ("word/document.xml", body_xml.as_str()), ("word/styles.xml", styles)],
+        );
+        let mut o = req(vec![Rule {
+            from_font: "Arial".into(),
+            to_font: "Calibri".into(),
+            style: "Normal".into(),
+            ..Default::default()
+        }]);
+        o.folder = dir.to_string_lossy().to_string();
+        run(&o, |_| {}).unwrap();
+        let body = read_part(&doc, "word/document.xml");
+        assert_eq!(body.matches("Calibri").count(), 2, "the paragraph without a style is Normal: {body}");
+        assert_eq!(body.matches("Arial").count(), 2, "the heading must stay: {body}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_known_arguments_start_the_command_line_mode() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        assert!(!wants_cli(&args(&[])));
+        assert!(!wants_cli(&args(&["-psn_0_12345"])), "a launcher argument must not block the window");
+        assert!(!wants_cli(&args(&["/some/file.docx"])));
+        assert!(wants_cli(&args(&["--folder", "/docs"])));
+        assert!(wants_cli(&args(&["--preset", "a.fctpl"])));
+        assert!(wants_cli(&args(&["--help"])));
+    }
+
+    #[test]
+    fn command_line_errors_are_readable() {
+        let m = cli_message("err.cli_usage\u{1f}--bogus");
+        assert!(m.contains("--bogus") && m.contains("--folder"), "{m}");
+        assert!(cli_message("err.cli_value\u{1f}--mask").contains("--mask needs a value"));
+        assert_eq!(cli_message("err.scope\u{1f}2"), "Rule 2: unknown area");
+        assert_eq!(cli_message("something else"), "something else");
+    }
+
+    #[test]
+    fn routing_charts_and_smartart() {
+        // charts and SmartArt used to be skipped silently; they are DrawingML text, like slides
+        assert_eq!(route(Kind::Word, "word/charts/chart1.xml"), Some(Route::DrawingMl));
+        assert_eq!(route(Kind::Word, "word/diagrams/data1.xml"), Some(Route::DrawingMl));
+        assert_eq!(route(Kind::Word, "word/diagrams/drawing1.xml"), Some(Route::DrawingMl));
+        assert_eq!(route(Kind::Excel, "xl/charts/chart1.xml"), Some(Route::DrawingMl));
+        assert_eq!(route(Kind::Slides, "ppt/charts/chart1.xml"), Some(Route::DrawingMl));
+        // parts that hold no fonts, relations and embedded objects stay untouched
+        assert_eq!(route(Kind::Word, "word/charts/colors1.xml"), None);
+        assert_eq!(route(Kind::Word, "word/charts/_rels/chart1.xml.rels"), None);
+        assert_eq!(route(Kind::Excel, "xl/charts/style1.xml"), None);
+        assert_eq!(route(Kind::Word, "word/embeddings/Worksheet1.xlsx"), None);
+        assert_eq!(route(Kind::Word, "word/media/image1.png"), None);
     }
 
     #[test]
@@ -1154,7 +2262,7 @@ mod tests {
         let written = save_template(&target.to_string_lossy(), tpl).unwrap();
         assert!(written.ends_with("my rules.fctpl"));
         let text = fs::read_to_string(&written).unwrap();
-        assert!(text.contains("\"format\": \"fctpl\"") && text.contains("\"version\": 1"));
+        assert!(text.contains("\"format\": \"fctpl\"") && text.contains("\"version\": 2"));
         assert!(!text.contains("scripts")); // unset options are not written
 
         let back = load_template(&written).unwrap();

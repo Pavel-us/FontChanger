@@ -106,6 +106,8 @@ tbody tr:hover { background: var(--hover); }
 .s-ok { color: var(--ok); font-weight: 600; }
 .s-skipped { color: var(--skip); }
 .s-error { color: var(--err); }
+.s-leftover { color: var(--accent); font-weight: 600; }
+.card select { width: 100%; background: var(--field); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .empty { padding: 36px 16px; text-align: center; white-space: pre-line; }
 
 .drop { position: fixed; inset: 0; z-index: 10; background: rgba(37,99,235,.18); backdrop-filter: blur(2px); display: grid; place-items: center; pointer-events: none; }

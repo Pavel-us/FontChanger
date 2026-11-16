@@ -44,7 +44,7 @@ const html = read(join(root, "src", "index.html"));
 for (const m of html.matchAll(/data-i18n(?:-ph|-title)?="([^"]+)"/g)) used.add(m[1]);
 const js = read(join(root, "src", "main.js"));
 // every quoted literal that looks like an i18n key (covers ternaries, tables, etc.)
-const PREFIXES = "app|folder|mask|opt|maxsize|theme|lang|from|to|field|btn|rules|rule|results|status|stat|row|dlg|drop|common|help|about|preset|presets|scan|update";
+const PREFIXES = "app|folder|mask|opt|maxsize|theme|lang|from|to|field|btn|rules|rule|results|status|stat|row|leftover|scope|style|missing|dlg|drop|common|help|about|preset|presets|scan|update";
 for (const m of js.matchAll(new RegExp(`"((?:${PREFIXES})\\.[A-Za-z_.]+)"`, "g"))) {
   if (!m[1].endsWith(".json")) used.add(m[1]); // file names are not keys
 }

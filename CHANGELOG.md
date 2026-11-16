@@ -2,6 +2,32 @@
 
 All notable changes are documented here. / Все заметные изменения описаны здесь.
 
+## [1.1.0] — 2026-11-16
+
+<!-- lang:en -->
+### Charts, areas, styles, sample, report, command line
+- **Charts and SmartArt** (Word, Excel, PowerPoint) are changed too; they were skipped silently before.
+- **Left over:** after a real run the files are read again, and anything the rules would still change is marked as left over, with a hint when the text sits in an embedded object or a picture.
+- **Areas:** a rule can be limited to the body, headers, footers, footnotes, endnotes, comments or style definitions (the "Apply to" picker, or `scope` in a template).
+- **Paragraph styles:** a rule can be limited to one Word paragraph style (`style`); `Normal` also reaches paragraphs without an explicit style.
+- **Priority:** the most specific rule wins: paragraph style, then area, then everywhere.
+- **From a sample…** takes the most used font and size from a document; "Save report…" writes the results as CSV (UTF-8 with a BOM).
+- **Check fonts…** lists the fonts the documents use but this computer does not have.
+- **`.fctpl` version 2** (rules may carry `scope` and `style`); version 1 files still load.
+- **Command line** without a window: `--folder`, `--preset`, `--report`, `--mask`, `--dry`, `--no-backup`, `--flat`, `--help`; exit code 0/1/2. Only known arguments start it, anything else opens the window.
+
+<!-- lang:ru -->
+### Диаграммы, области, стили, образец, отчёт, командная строка
+- **Диаграммы и SmartArt** (Word, Excel, PowerPoint) теперь тоже меняются; раньше они молча пропускались.
+- **Осталось:** после реального прогона файлы читаются заново, и всё, что правила всё ещё изменили бы, помечается как «осталось»; если текст в встроенном объекте или картинке, есть подсказка.
+- **Области:** правило можно ограничить основным текстом, колонтитулами, сносками, концевыми сносками, примечаниями или определениями стилей (выбор «Применить к» или `scope` в шаблоне).
+- **Стили абзаца:** правило можно ограничить одним стилем абзаца Word (`style`); `Normal` затрагивает и абзацы без явного стиля.
+- **Приоритет:** побеждает самое точное правило: стиль абзаца, затем область, затем «везде».
+- **«По образцу…»** берёт самые частые шрифт и размер из документа; «Сохранить отчёт…» записывает результаты в CSV (UTF-8 с BOM).
+- **«Проверить шрифты…»** показывает шрифты, которые есть в документах, но не установлены на этом компьютере.
+- **`.fctpl` версии 2** (в правилах могут быть `scope` и `style`); файлы версии 1 загружаются.
+- **Командная строка** без окна: `--folder`, `--preset`, `--report`, `--mask`, `--dry`, `--no-backup`, `--flat`, `--help`; код возврата 0/1/2. Запускается только по известным аргументам, любые другие открывают окно.
+
 ## [1.0.0] — 2026-11-14
 
 <!-- lang:en -->

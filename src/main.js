@@ -177,6 +177,8 @@
     const parts = [];
     if (r.toFont) parts.push(`${r.fromFont || t("rule.any_font")} → ${r.toFont}`);
     if (r.toSize) parts.push(`${r.fromSize ? r.fromSize + " pt" : t("rule.any_size")} → ${r.toSize} pt`);
+    if (r.scope) parts.push(t("rule.in_area", t("scope." + r.scope)));
+    if (r.style) parts.push(t("rule.in_style", r.style));
     return parts.join("   ·   ");
   }
   function renderRules() {
@@ -201,10 +203,39 @@
     });
   }
 
+  let leftoverCount = 0;
+
   function statusText(status, info, dry, fonts, sizes) {
     if (status === "ok") return t(dry ? "row.found" : "row.replaced", fonts, sizes);
+    if (status === "leftover") return t("row.leftover", info);
     if (status === "skipped") return t("row.skipped", tb(info));
     return t("row.error", tb(info));
+  }
+
+  // After a real run: mark the files where the rules would still change something —
+  // text inside embedded objects, pictures, or charts the engine could not reach.
+  async function markLeftovers(req) {
+    let list = [];
+    try { list = await invoke("verify_run", { req }); } catch (e) { return 0; }
+    if (!list || !list.length) return 0;
+    const byPath = new Map(list.map((r) => [r.path, r]));
+    document.querySelectorAll("#rows tr").forEach((tr) => {
+      const r = byPath.get(tr.dataset.path);
+      if (!r) return;
+      const parts = [];
+      if (r.fonts.length) parts.push(r.fonts.join(", "));
+      if (r.sizes.length) parts.push(r.sizes.map((s) => s + " pt").join(", "));
+      let what = parts.join(" · ");
+      const why = r.hint === "embeddings" ? t("leftover.embeddings") : r.hint === "media" ? t("leftover.media") : "";
+      if (why) what += " — " + why;
+      tr.dataset.status = "leftover";
+      tr.dataset.info = what;
+      const td = tr.lastElementChild;
+      td.className = "s-leftover";
+      td.textContent = statusText("leftover", what, false, 0, 0);
+      td.title = td.textContent;
+    });
+    return list.length;
   }
 
   function renderStats() {
@@ -216,6 +247,7 @@
       ["stat.files", s.files], ["stat.changed", s.changed], ["stat.fonts", s.fonts], ["stat.sizes", s.sizes],
       ["stat.skipped", s.skipped], ["stat.errors", s.errors],
     ];
+    if (leftoverCount) items.push(["stat.leftover", leftoverCount]);
     for (const [key, val] of items) {
       const d = document.createElement("div");
       d.className = "stat" + (key === "stat.errors" && val ? " err" : "");
@@ -246,6 +278,7 @@
     const r = {
       fromFont: $("fromFont").value.trim(), toFont: $("toFont").value.trim(),
       fromSize: $("fromSize").value.trim(), toSize: $("toSize").value.trim(),
+      scope: $("scope").value, style: $("style").value.trim(),
     };
     if (!r.toFont && !r.toSize) { notify(t("dlg.empty_rule")); return null; }
     if (r.fromFont && !r.toFont) { notify(t("dlg.font_target")); return null; }
@@ -254,6 +287,8 @@
   }
   function clearFields() {
     for (const id of ["fromFont", "toFont", "fromSize", "toSize"]) $(id).value = "";
+    $("scope").value = "";
+    $("style").value = "";
   }
 
   $("addRule").onclick = () => {
@@ -662,6 +697,76 @@
     if (tr && tr.dataset.path) T.opener.revealItemInDir(tr.dataset.path).catch(() => {});
   });
 
+  // ───────────────────────── sample and report ─────────────────────────
+  function fmtPt(pt) {
+    return String(Math.round(pt * 100) / 100).replace(".", ",");
+  }
+
+  // take the most used font and size from a document the user picks
+  $("sampleFile").onclick = async () => {
+    try {
+      const p = await T.dialog.open({
+        multiple: false, directory: false, title: t("dlg.sample_dialog"),
+        filters: [{ name: t("dlg.doc_filter"), extensions: ["docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "pptx", "pptm", "odt", "ods", "odp", "rtf", "html", "htm", "css"] }],
+      });
+      if (typeof p !== "string") return;
+      const s = await invoke("sample_file", { path: p });
+      if (!s.fonts.length && !s.sizes.length) return notify(t("dlg.sample_empty"));
+      clearFields();
+      if (s.fonts.length) $("toFont").value = s.fonts[0][0];
+      if (s.sizes.length) $("toSize").value = fmtPt(s.sizes[0][0]);
+      setStatus("status.sampled", s.fonts.length ? s.fonts[0][0] : "—", s.sizes.length ? fmtPt(s.sizes[0][0]) : "—");
+    } catch (e) { notify(tb(e), "error"); }
+  };
+
+  // the results table as a CSV file
+  $("reportBtn").onclick = async () => {
+    const rows = [...document.querySelectorAll("#rows tr")].map((tr) => ({
+      path: relPath(tr.dataset.path),
+      count: tr.children[1].textContent,
+      status: tr.children[2].textContent,
+    }));
+    if (!rows.length) return notify(t("dlg.nothing"));
+    try {
+      const p = await T.dialog.save({
+        title: t("dlg.report_dialog"), defaultPath: "font-changer-report.csv",
+        filters: [{ name: t("dlg.csv_filter"), extensions: ["csv"] }],
+      });
+      if (typeof p !== "string") return;
+      const written = await invoke("save_report", { path: p, rows });
+      notify(t("dlg.report_saved", written), "info");
+    } catch (e) { notify(tb(e), "error"); }
+  };
+
+  // fonts the documents use but this machine does not have
+  $("missingBtn").onclick = async () => {
+    const folder = $("folder").value.trim();
+    if (!folder) return notify(t("dlg.no_folder"));
+    try {
+      const req = {
+        folder, mask: $("mask").value || "*", recursive: $("opt-recursive").checked,
+        maxSizeMb: Math.max(0, Math.floor(Number($("maxsize").value) || 0)),
+      };
+      const list = await invoke("missing_fonts", { req });
+      const box = $("missingList");
+      box.textContent = "";
+      if (!list.length) {
+        const li = document.createElement("li");
+        li.textContent = t("missing.none");
+        box.appendChild(li);
+      } else {
+        for (const f of list) {
+          const li = document.createElement("li");
+          li.textContent = `${f.name} — ${t("missing.files", f.files)}`;
+          box.appendChild(li);
+        }
+      }
+      showModal("missingModal");
+    } catch (e) { notify(tb(e), "error"); }
+  };
+  $("missingClose").onclick = () => hideModal("missingModal");
+  $("missingModal").addEventListener("click", (e) => { if (e.target === $("missingModal")) hideModal("missingModal"); });
+
   // ───────────────────────── run ─────────────────────────
   async function start(dry) {
     if (running) return;
@@ -703,6 +808,7 @@
       const s = await invoke("run_change", { req });
       flush();
       lastStats = s;
+      leftoverCount = dry ? 0 : await markLeftovers(req);
       renderStats();
       const sec = ((performance.now() - t0) / 1000).toFixed(1);
       setStatus(dry ? "status.preview_done" : "status.done", sec);

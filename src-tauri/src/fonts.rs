@@ -1410,6 +1410,18 @@ mod tests {
     }
 
     #[test]
+    fn chart_part_fonts_and_sizes() {
+        // chart and SmartArt parts use the same DrawingML text properties as slides
+        let r = rules(&[(Some("Calibri"), "Times New Roman")], &[(None, 12.0)]);
+        let xml = r#"<c:chartSpace><c:txPr><a:p><a:pPr><a:defRPr sz="1000"><a:latin typeface="Calibri"/></a:defRPr></a:pPr></a:p></c:txPr></c:chartSpace>"#;
+        let (out, c) = drawingml_part(xml, &r, false);
+        assert!(out.contains(r#"typeface="Times New Roman"#));
+        assert!(out.contains(r#"sz="1200""#));
+        assert_eq!(c.fonts, 1);
+        assert_eq!(c.sizes, 1);
+    }
+
+    #[test]
     fn number_format() {
         assert_eq!(fmt_num(12.0), "12");
         assert_eq!(fmt_num(10.5), "10.5");
